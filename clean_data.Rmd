@@ -1,0 +1,456 @@
+---
+output:
+  html_document:
+    number_sections: yes
+    toc: yes
+  pdf_document:
+    number_sections: yes
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{=html}
+<!---
+Program  : Stat_FIRE_MARBEC.Rmd
+Author   : Celia
+Objective: Code statistique données MARBEC
+Creation : 30/01/2024
+Update   : 30/01/2024
+-->
+```
+---
+title: 'Projet Données MARBEC'
+author: "Célia Bertrand"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+  toc: true 
+  toc_depth : 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r, include=FALSE, echo=FALSE, results='hide'}
+#Loading packages
+require(ade4)
+require(ape)
+library(cluster)
+library(corrplot)
+library(cowplot)
+library(dplyr)
+library(factoextra)
+library(FactoMineR)
+library(ggplot2)
+library(ggrepel)  # pour éviter le chevauchement des étiquettes
+library(lwgeom)
+library(MASS)
+library(nngeo)
+library(pairwiseAdonis)
+library(plyr)
+library(psych)
+library(rdacca.hp)
+library(sf)
+library(spdep)
+library(tidyverse) 
+require(vegan)
+library(sdmpredictors)
+library(leaflet)
+library(lme4)
+library(nlme)
+library(lattice)
+library(car)
+library(DALEX)
+library(biomod2)
+
+```
+
+# Mise en forme de nos jeux de données
+biodiv : fichier présence absence pour chaque espèce dans chaque filtre SPYGEN
+```{r}
+# data sp
+biodiv=read.table("species_med.txt")
+biodiv_elasmo <- biodiv[,c("Aetomylaeus_bovinus", "Bathytoshia_lata", "Dasyatis_pastinaca", "Dasyatis_tortonesei", "Etmopterus_spinax", "Galeus_melastomus", "Mobula_mobular", "Mustelus_mustelus", "Myliobatis_aquila", "Prionace_glauca", "Pteroplatytrygon_violacea", "Raja_brachyura", "Raja_undulata", "Rostroraja_alba", "Scyliorhinus_canicula", "Scyliorhinus_stellaris", "Squatina_squatina", "Torpedo_marmorata", "Bathytoshia_lata")] 
+
+
+rowSums(biodiv)
+colSums(biodiv)
+
+rowSums(biodiv_elasmo)
+colSums(biodiv_elasmo)
+
+# Remove rows with 0 obs: enlever les espèces qui ne sont pas présentes
+biodiv <- biodiv[rowSums(biodiv[,])!=0,]   #159 espèces en tout
+biodiv_elasmo <- biodiv_elasmo[rowSums(biodiv_elasmo[,])!=0,]   #19 espèces en tout et 127 sites avec au moins 1 elasmo
+
+```
+
+MEDD_confinement_strict : data regroupant les données sur les sites d'échantillonnages (date, nom site, durée, volume filtré, prof moyenne, coordonnées géographiques, etc).
+
+```{r}
+# ouverture de fichier
+MEDD_confinement_strict <- read.csv(file = "MEDD_confinement_strict.csv", header = TRUE, sep = ";", dec=".", na = "NA") 
+
+head(MEDD_confinement_strict)
+dim(MEDD_confinement_strict) 
+
+#set as dataframe
+MEDD_confinement_strict <- as.data.frame(MEDD_confinement_strict)
+
+#changer les noms des lignes
+rownames(MEDD_confinement_strict)=MEDD_confinement_strict[,"SPYGEN_code"] 
+
+#supprimer variables 
+MEDD_confinement_strict$Date <- NULL
+MEDD_confinement_strict$Country <- NULL
+MEDD_confinement_strict$pkey <- NULL
+MEDD_confinement_strict$latitude_start_raw <- NULL
+MEDD_confinement_strict$longitude_start_raw <- NULL
+MEDD_confinement_strict$longitude_turn_raw <- NULL
+MEDD_confinement_strict$latitude_turn_raw <- NULL
+MEDD_confinement_strict$longitude_end_raw <- NULL
+MEDD_confinement_strict$latitude_end_raw <- NULL
+
+#traiter le jeux de données pour ne garder que les lignes correspondant aux codes spygen en commun 
+common_ids <- intersect(row.names(MEDD_confinement_strict), row.names(biodiv)) #créé un objet avec les noms de lignes en commun
+filtered_biodiv <- biodiv[row.names(biodiv) %in% common_ids, ] #récupérer seulement les lignes en commun entre les deux jeux de données
+filtered_MEDD <- MEDD_confinement_strict[row.names(MEDD_confinement_strict) %in% common_ids, ]
+#On se retrouve avec un jeux de donnée avec 186 sites !
+
+filtered_MEDD$SPYGEN_code <- as.factor(filtered_MEDD$SPYGEN_code)
+filtered_MEDD$Confinement <- as.factor(filtered_MEDD$Confinement)
+filtered_MEDD$protection <- as.factor(filtered_MEDD$protection)
+filtered_MEDD$Site <- as.factor(filtered_MEDD$Site)
+filtered_MEDD$transect <- as.factor(filtered_MEDD$transect)
+filtered_MEDD$habitat_principal <- as.factor(filtered_MEDD$habitat_principal)
+
+summary(filtered_MEDD)
+```
+
+## Traitement des données
+```{r}
+# dbRDA avec distance de Jaccard sur la matrice espèces
+# fonction capscale pour effectuer une analyse de coordonnées principales de capscale (=analyse de redondance contrainte, RDA). Permet d'examiner comment la variation dans un ensemble de données sur les espèces est expliquée par un ensemble de variables explicatives.
+#Distance de Jaccard utilisée car données de présence/absence. 
+#add = TRUE : indique que des termes additifs (tels que des effets aléatoires ou des erreurs) sont inclus dans le modèle
+
+#RDA pour toutes les variables (attention au valeurs manquantes...)
+RDA=capscale(filtered_biodiv[,] ~ Confinement + protection + least_dist_reserve + mean_depth_transect + transect + habitat_div + habitat_principal + declin_mean + cohesion_mean + mean_bathy + mean_ag + mean_am + mean_aq + mean_co + mean_er + mean_in + mean_mo_ais + mean_mo_pp + mean_pe + mean_po + mean_re + mean_to + mean_tm + dist_land + dist_ports + chloroDay + chloroWeek + chloroMonth + chloroYear + tempDay + tempWeek + tempMonth + tempYear, filtered_MEDD, dist="jaccard", na.action = na.omit, add =TRUE)
+summary(RDA)
+plot(RDA) # Génère graphique d'ordination : montre relations entre les compositions spécifiques et les variables environnementales
+
+#RDA pour les variables dont je connaît la nature
+RDA2=capscale(filtered_biodiv[,] ~ Confinement + protection + least_dist_reserve + mean_depth_transect + transect + habitat_div + habitat_principal + declin_mean + cohesion_mean + mean_bathy + dist_land + dist_ports + chloroDay + chloroWeek + chloroMonth + chloroYear + tempDay + tempWeek + tempMonth + tempYear, filtered_MEDD, dist="jaccard", na.action = na.omit, add =TRUE)
+summary(RDA2)
+plot(RDA2)
+
+# Extraire les scores des axes
+scores_rda = scores(RDA, display = "sites")
+
+# Utiliser s.class pour visualiser les variables qualitatives
+#.class(scores_rda[,1:2], filtered_MEDD$Confinement)
+#.class(scores_rda[,1:2], filtered_MEDD$protection)
+#marche pas mais je ne sais pas pourquoi
+#nova(RDA,by="terms")
+
+```
+
+
+## Analyses préliminaires
+```{r}
+# Variables quantitatives à centrer et réduire
+variables_quantitatives <- c("least_dist_reserve", "habitat_div", "mean_bathy", "dist_land", "dist_ports", "chloroDay", "tempDay") 
+#je pourrais rajouter les autres var quantitatives une fois que je comprends à quoi elles correspondent : "declin_mean", "cohesion_mean", "mean_ag", "mean_am", "mean_aq",  "mean_co" , "mean_er" , "mean_in" , "mean_mo_ais" , "mean_mo_pp" , "mean_pe" , "mean_po" , "mean_re" , "mean_to" , "mean_tm"
+
+# Création du data.frame centré et réduit
+filtered_MEDD_final <- filtered_MEDD[c("SPYGEN_code", "Confinement", "protection", "transect", "habitat_principal", variables_quantitatives)]
+
+# Centrer et réduire uniquement les variables quantitatives
+filtered_MEDD_final[, variables_quantitatives] <- scale(filtered_MEDD_final[, variables_quantitatives])
+
+#séparer variables quantitatives
+data_quantitative <- filtered_MEDD_final[c("least_dist_reserve", "habitat_div", "mean_bathy", "dist_land", "dist_ports", "chloroDay", "tempDay")] 
+
+# Corrélations entre variables quantitatives : 
+pairs.panels(scale(data_quantitative), 
+             method = "spearman", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = FALSE) # show correlation ellipses
+   #on peut voir qu'il est pas necessaire de garder toutes les var de température et de chlorophylle (garder seulement pour le jour)
+
+#créer distance sur données quanti uniquement
+d=as.data.frame(scale(data_quantitative))
+summary(data_quantitative)
+euclidean_dist <- dist(d, method = "euclidean")
+
+#ACP
+# Remplacer les valeurs manquantes par la médiane
+data_imputed <- apply(data_quantitative, 2, function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x))
+
+# ACP sur les données imputées
+acp1=dudi.pca(data_imputed, scan = FALSE, nf = 5)
+fviz_eig(acp_result, addlabels = TRUE) 
+fviz_pca_biplot(acp1)
+s.corcircle(acp1$co) #representation graphique
+
+#AFC
+afc_1 <- dudi.coa(filtered_biodiv, scannf = TRUE, nf = 3)
+fviz_ca_biplot(afc_1,   col.row = "blue", col.col= "black")
+#pas de différences de composition spé clair entre site
+
+```
+
+
+```{r}
+#nouveau jeu de données 
+load("confinement.RData")
+data_biodiv <- data[, 1:160]
+data_MED <- data[, 161:285]
+#j'ai bien vérifié qu'on avait des detections sur tous les sites
+#j'ai aussi vérifié qu'on avait bient les même codes spygen pour les deux fichiers
+
+#supprimer variables 
+data_MED$Date <- NULL
+data_MED$Country <- NULL
+data_MED$pkey <- NULL
+data_MED$method <- NULL
+data_MED$depth <- NULL
+data_MED$Time_start <- NULL
+data_MED$projet <- NULL
+data_MED$Comments <- NULL
+data_MED$Teleo <- NULL
+data_MED$Mammifere <- NULL
+data_MED$filter <- NULL
+data_MED$Temporisation <- NULL
+data_MED$duration <- NULL
+data_MED$Volume_filtered <- NULL
+data_MED$protection_reglementation <- NULL
+data_MED$latitude_start_raw <- NULL
+data_MED$longitude_start_raw <- NULL
+data_MED$longitude_turn_raw <- NULL
+data_MED$latitude_turn_raw <- NULL
+data_MED$longitude_end_raw <- NULL
+data_MED$latitude_end_raw <- NULL
+#mettre variables en facteur
+data_MED$Row.names.y <- as.factor(data_MED$Row.names.y)
+data_MED$Confinement <- as.factor(data_MED$Confinement)
+data_MED$protection <- as.factor(data_MED$protection)
+data_MED$transect <- as.factor(data_MED$transect)
+data_MED$habitat_principal <- as.factor(data_MED$habitat_principal)
+# Variables quantitatives à centrer et réduire
+# R chondri LFI
+variables_quantitatives <- c("R","Chondri", "LFI", "least_dist_reserve", "habitat_div", "mean_depth_transect", "mean_bathy", "logland", "logport", "chloroDay", "chloroYear", "tempDay",  "tempYear") 
+#je pourrais rajouter les autres var quantitatives une fois que je comprends à quoi elles correspondent : "declin_mean", "cohesion_mean", "mean_ag", "mean_am", "mean_aq",  "mean_co" , "mean_er" , "mean_in" , "mean_mo_ais" , "mean_mo_pp" , "mean_pe" , "mean_po" , "mean_re" , "mean_to" , "mean_tm"
+#R (richesse) et LFI (large fish index) trés fortement corrélé -> je garde LFI
+
+# Création du data.frame centré et réduit
+data_MED_final <- data_MED[c("Row.names.y", "Confinement", "protection", "transect", "habitat_principal",  variables_quantitatives)]
+# Centrer et réduire uniquement les variables quantitatives
+data_MED_final[, variables_quantitatives] <- scale(data_MED_final[, variables_quantitatives])
+
+#séparer variables quantitatives centrées réduites
+data_quantitative <- data_MED_final[c("R","Chondri", "LFI", "least_dist_reserve", "habitat_div", "mean_depth_transect", "mean_bathy", "logland", "logport","chloroDay",   "chloroYear", "tempDay",  "tempYear")] 
+
+# Corrélations entre variables quantitatives : 
+pairs.panels(scale(data_quantitative), 
+             method = "spearman", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = FALSE) # show correlation ellipses
+   #on peut voir qu'il est pas necessaire de garder toutes les var de température et de chlorophylle (garder seulement pour le jour et l'année)
+# atttention chloro année et temp année fortement corrélé aussi ! 
+#attention a moyenne profondeur transect et moyenne bathy corrélées
+
+#ploter les données :
+#confinement montre une différence de richesse spé
+#protection ne montre pas de diff de richesse
+#richesse spé semble augmenter en cotier (transect)
+plot_grid(nrow = 1, ncol = 3,
+ ggplot(data_MED_final, aes(y = Confinement, x = R, fill = R)) +
+ geom_boxplot(show.legend = FALSE)+
+ xlab("richesse spé") +
+ ylab("Confinement"),
+ ggplot(data_MED_final, aes(y = protection, x = R, fill = R)) +
+ geom_boxplot(show.legend = FALSE)+
+ xlab("richesse spé") +
+ ylab("protection"),
+  ggplot(data_MED_final, aes(y = R, x = transect)) +
+ geom_point() +
+ xlab("transect") +
+ ylab("richesse)"))
+
+#ploter plus en détail
+ ggplot(data_MED, aes(x=R, y=LFI, shape=Confinement, colour=Confinement, fill=Confinement)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("richesse") +
+ ylab("LFI") +
+ ggtitle("Une regression par confinement couleur") #lorsqu'on est en confinement, interieur ou dehors des reserves on a globalement une plus grande richesse associé avec des poissons de plus grande taille 
+ #les transect offshore ont un LFI de 20 max et un R de 25 max (faible du a pb detection? effort d'echantillonnage plus faible?)
+ 
+ ggplot(data_MED_final, aes(x=R, y=Chondri, shape=transect, colour=transect, fill=transect)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("Chondri") +
+ ggtitle("Une regression par confinement couleur")# quand richesse augmente richesse en chondri augmente (logique)
+ #observé pour reserve et en dehors, en confinement et en dehors, en cotier ou offshore
+ 
+  ggplot(data_MED_final, aes(x=R, y=least_dist_reserve, shape=protection, colour=protection, fill=protection)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("distance reserve") +
+ ggtitle("Une regression par confinement couleur") #distance à la reserve semble pas expliquer richesse spé
+ 
+    ggplot(data_MED, aes(x=R, y=habitat_div, shape=habitat_principal, colour=habitat_principal, fill=habitat_principal)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("div habitat") +
+ ggtitle("Une regression par confinement couleur") #pas de lien clair
+ 
+      ggplot(data_MED, aes(x=R, y=mean_depth_transect, shape=protection, colour=protection, fill=protection)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("profondeur moyenne transect") +
+ ggtitle("Une regression par confinement couleur") #pas de lien clair
+      
+       ggplot(data_MED, aes(x=R, y=logland, shape=Confinement, colour=Confinement, fill=Confinement)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("logland") +
+ ggtitle("Une regression par confinement couleur") #en confinement il ne semble pas y avoir de lien entre richesse et distance à la côte, par contre hors confinement une diminution de la distance à la côte entraine une augmentation de la richesse
+       # la richesse augmente quand le log de la distance a la cote diminue en dehors des reserves (distance cst car reserve côtière) , quand on est offshore ou en cotier, distance à la cote nexplique pas modif de richesse
+       
+       ggplot(data_MED_final, aes(x=R, y=logport, shape=protection, colour=protection, fill=protection)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("logport") +
+ ggtitle("Une regression par confinement couleur") #logport explique pas changement de R
+ 
+        ggplot(data_MED_final, aes(x=R, y=chloroDay, shape=transect, colour=transect, fill=transect)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("chloroDay") +
+ ggtitle("Une regression par confinement couleur") #pas de lien clair chloro et richesse
+        
+          ggplot(data_MED, aes(x=R, y=tempDay, shape=protection, colour=protection, fill=protection)) +
+ geom_smooth(method="lm",se=FALSE,fullrange=TRUE) +
+ geom_point() +
+ xlab("R") +
+ ylab("tempDay") +
+ ggtitle("Une regression par confinement couleur") #pas de lien clair entre temperature et richesse
+ 
+```
+
+#Choix du modèle linéaire : ancova
+```{r}
+#var quanti : "R","Chondri", "LFI", "least_dist_reserve", "habitat_div", "mean_depth_transect", "mean_bathy", "logland", "logport", "chloroDay", "chloroYear", "tempDay",  "tempYear"
+#var quali : "Confinement", "protection", "transect", "habitat_principal"
+#david garde : Confinement  + protection +  logport + logland + habitat_div  + chloroWeek + tempWeek + tempYear + chloroYear + min_bathy
+
+#Choix du modèle linéaire : ancova
+
+mod1 <- lm(R ~ logland + Chondri + LFI + Confinement + protection + LFI*Confinement + logland*protection + logland*Confinement, data=data_MED_final)
+ drop1(mod1,.~ ., test="F")
+mod2 <- lm(R ~ logland + Chondri + LFI + Confinement + protection + logland*protection +logland*Confinement, data=data_MED_final)
+ drop1(mod2,.~ ., test="F")
+mod3 <- lm(R ~ logland + Confinement + Chondri + LFI  + protection +logland*Confinement, data=data_MED_final)
+ drop1(mod3,.~ ., test="F")
+mod4 <- lm(R ~ logland + Confinement + Chondri + LFI +logland*Confinement, data=data_MED_final)
+ drop1(mod4,.~ ., test="F")
+ 
+ mod5 <- lm(R ~ logland + Confinement + LFI +logland*Confinement, data=data_MED_final)
+ drop1(mod5,.~ ., test="F")
+ summary(mod5)
+##tester hypothèses du modèle
+ par(mfrow=c(2,2))
+ plot(mod5)
+ shapiro.test(mod5$res) #p-value = 0.736
+#verifier residus 
+ res <-mod5$res
+ fitted <-fitted(mod5)
+ resfit <-bind_cols(res =res,
+ fit =fitted,
+ PRD =data_MED_final$LFI)
+ plot_grid(nrow= 2, ncol= 2,
+ ggplot(as_tibble(res), aes(x =res)) +
+ geom_histogram(bins = 30,
+ fill ="lightblue", color= "black")+
+ labs(title= "Histogrammedes residus"),
+ ggplot(as_tibble(res), aes(sample= res)) +
+ stat_qq()+
+ stat_qq_line()+
+ labs(title= "Normal Q-QPlot"),
+ ggplot(resfit,aes(y = res, x = fit)) +
+ geom_point()+
+ labs(title= "Valeurs ajustees"),
+ ggplot(resfit,aes(y = res, x = PRD)) +
+ geom_point()+
+ xlab(" ") +
+ labs(title= "En fonctionde LFI"))
+
+```
+#Choix du modèle GLM 
+```{r}
+#var quanti : "R","Chondri", "LFI", "least_dist_reserve", "habitat_div", "mean_depth_transect", "mean_bathy", "logland", "logport", "chloroDay", "chloroYear", "tempDay",  "tempYear"
+#var quali : "Confinement", "protection", "transect", "habitat_principal"
+#david garde : Confinement  + protection +  logport + logland + habitat_div  + chloroWeek + tempWeek + tempYear + chloroYear + min_bathy
+
+#Choix du modèle GLM 
+
+glm1 <- glm(R ~ Confinement+protection+transect+habitat_principal+Chondri+LFI+least_dist_reserve+habitat_div+mean_bathy+logland+logport+chloroDay+chloroYear+tempDay+tempYear, na.action="na.omit", data = data_MED_final)
+summary(mod) #richesse semble etre expliquée par le confinement
+
+glm2 <- glm(R ~ Confinement+protection+habitat_principal+Chondri+LFI+least_dist_reserve+habitat_div+mean_bathy+logland+logport+chloroDay+chloroYear+tempDay+tempYear, na.action="na.omit", data = data_MED_final)
+anova(mod,mod2)
+summary(mod2)
+#enlever transect, logport
+
+ drop1(glm1,.~ ., test="F")
+#habitat principal
+
+```
+
+## SDM mono espèces
+```{r}
+#var quanti : "R","Chondri", "LFI", "least_dist_reserve", "habitat_div", "mean_depth_transect", "mean_bathy", "logland", "logport", "chloroDay", "chloroYear", "tempDay",  "tempYear"
+#var quali : "Confinement", "protection", "transect", "habitat_principal"
+#david garde : Confinement  + protection +  logport + logland + habitat_div  + chloroWeek + tempWeek + tempYear + chloroYear + min_bathy
+
+# "Aetomylaeus_bovinus", "Bathytoshia_lata", "Dasyatis_pastinaca", "Dasyatis_tortonesei", "Etmopterus_spinax", "Galeus_melastomus", "Mobula_mobular", "Mustelus_mustelus", "Myliobatis_aquila", "Prionace_glauca", "Pteroplatytrygon_violacea", "Raja_brachyura", "Raja_undulata", "Rostroraja_alba", "Scyliorhinus_canicula", "Scyliorhinus_stellaris", "Squatina_squatina", "Torpedo_marmorata", "Bathytoshia_lata"
+#Etape 1 : LE GLM
+ 
+#test célia seule : 
+names(data_MED_final)[1] <- "Row.names"
+result <- merge(data_biodiv, data_MED_final, by = "Row.names", all = TRUE)
+
+#rajouter fonction de lien 
+glm1 <- glm(Dasyatis_pastinaca ~ Confinement + protection + transect + habitat_principal + Chondri + R + LFI + least_dist_reserve + habitat_div + mean_bathy + logland + logport + chloroDay + chloroYear + tempDay + tempYear, na.action="na.omit", data = result, family=binomial)
+summary(glm1)
+# elasmo pas dans les reserves mais proches ?
+#raies mais dans habitat diversifié
+#temp et chloro semblent important
+
+#code voir avec Cyril : objectif faire une boucle pour faire 1glm/espèce et avoir la moyenne des AUC pour un modèle donné
+
+
+
+```
+
+## SDM plusieurs espèces
+```{r}
+#code 
+
+
+```
+
+
